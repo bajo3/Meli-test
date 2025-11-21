@@ -13,7 +13,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 
 const ML_ACCESS_TOKEN =
-    "APP_USR-1014187039987973-112109-ddcd368c59f6500b584f1ea1c4045dbb-327544193"; // ⚠️ SOLO DEV. PONÉ ACÁ TU APP_USR PARA PROBAR.
+    "APP_USR-1014187039987973-112109-"; // ⚠️ SOLO DEV. PONÉ ACÁ TU APP_USR PARA PROBAR.
 const ML_USER_ID = 327544193;
 
 // Helper para llamar a Mercado Libre
