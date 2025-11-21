@@ -12,14 +12,16 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import MeliItemRow, { type RelistStep } from "../components/MeliItemRow";
-import {
-  meliFetch,
-  getItemsByIds,
-  type MeliItem,
-} from "../lib/meliApi";
+import { meliFetch, getItemsByIds, type MeliItem } from "../lib/meliApi";
 
 // 👉 Tu user_id de ML
 const ML_USER_ID = 327544193;
+
+type QuotaInfo = {
+  used: number;
+  available: number;
+  total: number;
+};
 
 export default function MeliTest() {
   const [loading, setLoading] = useState(false);
@@ -28,12 +30,30 @@ export default function MeliTest() {
   const [relistingId, setRelistingId] = useState<string | null>(null);
   const [relistStep, setRelistStep] = useState<RelistStep>(null);
 
-  // Cargar ítems publicados AUTOMÁTICAMENTE desde ML
+  const [quotaLoading, setQuotaLoading] = useState(false);
+  const [quota, setQuota] = useState<{
+    silver?: QuotaInfo;
+    gold?: QuotaInfo;
+  }>({});
+
+  // ===================== HELPERS CUPOS =====================
+  const buildQuotaFrom = (obj: any): QuotaInfo => {
+    const used =
+      obj?.used_listings ?? obj?.used ?? 0;
+    const available =
+      obj?.remaining_listings ?? obj?.available ?? 0;
+    const total =
+      obj?.total_listings ?? obj?.total ?? used + available;
+
+    return { used, available, total };
+  };
+
+  // ===================== LOAD ITEMS =====================
+
   const loadItems = async () => {
     try {
       setLoading(true);
 
-      // 1) Lista de IDs de publicaciones activas del usuario
       const search = await meliFetch(
         `/users/${ML_USER_ID}/items/search?status=active&limit=50&offset=0`
       );
@@ -45,7 +65,6 @@ export default function MeliTest() {
         return;
       }
 
-      // 2) Traer detalle de todos esos items (respeta límite 20 ids por request)
       const parsed = await getItemsByIds(ids);
       setItems(parsed);
     } catch (e: any) {
@@ -59,11 +78,79 @@ export default function MeliTest() {
     }
   };
 
+  // ===================== LOAD QUOTA =====================
+
+  const loadQuota = async () => {
+    try {
+      setQuotaLoading(true);
+
+      const packs = await meliFetch(
+        `/users/${ML_USER_ID}/classifieds_promotion_packs?package_content=publications`
+      );
+
+      console.log("PACKS RAW:", packs);
+
+      if (!Array.isArray(packs) || packs.length === 0) {
+        setQuota({});
+        return;
+      }
+
+      // Paquete actual (status === "active")
+      const activePack = packs.find((p: any) => p.status === "active");
+
+      if (!activePack) {
+        setQuota({});
+        return;
+      }
+
+      const listingDetails: any[] = Array.isArray(activePack.listing_details)
+        ? activePack.listing_details
+        : [];
+
+      // Intentamos separar por tipo de publicación
+      const silverDetail = listingDetails.find((d) =>
+        String(d.listing_type_id || "").toLowerCase().includes("silver")
+      );
+      const goldDetail = listingDetails.find((d) =>
+        String(d.listing_type_id || "").toLowerCase().includes("gold")
+      );
+
+      let silverQuota: QuotaInfo | undefined;
+      let goldQuota: QuotaInfo | undefined;
+
+      // Si hay detalle específico de silver, lo usamos.
+      // Si no, usamos el cupo total del pack como "silver".
+      if (silverDetail) {
+        silverQuota = buildQuotaFrom(silverDetail);
+      } else {
+        silverQuota = buildQuotaFrom(activePack);
+      }
+
+      // Si hay detalle específico de gold, lo seteamos.
+      // Si no, queda undefined (no hay cupo oro separado en el pack).
+      if (goldDetail) {
+        goldQuota = buildQuotaFrom(goldDetail);
+      }
+
+      setQuota({
+        silver: silverQuota,
+        gold: goldQuota,
+      });
+    } catch (e: any) {
+      console.log("ERROR loadQuota:", e);
+      setQuota({});
+    } finally {
+      setQuotaLoading(false);
+    }
+  };
+
   useEffect(() => {
     loadItems();
+    loadQuota();
   }, []);
 
-  // Cambiar precio
+  // ===================== UPDATE PRICE =====================
+
   const handleUpdatePrice = async (itemId: string, newPriceStr: string) => {
     const cleaned = newPriceStr.replace(/[^\d.,]/g, "").replace(",", ".");
     const newPrice = Number(cleaned);
@@ -96,7 +183,8 @@ export default function MeliTest() {
     }
   };
 
-  // Cerrar (borrar) publicación simple
+  // ===================== CLOSE ITEM =====================
+
   const handleClose = async (itemId: string) => {
     try {
       setUpdatingId(itemId);
@@ -117,6 +205,7 @@ export default function MeliTest() {
 
       setItems((prev) => prev.filter((it) => it.id !== itemId));
       Alert.alert("Cerrada", `La publicación ${itemId} fue cerrada.`);
+      loadQuota();
     } catch (e: any) {
       console.log("ERROR CLOSE:", e);
       Alert.alert("Error", e.message || "No se pudo cerrar la publicación");
@@ -125,25 +214,44 @@ export default function MeliTest() {
     }
   };
 
-  // Republicar en modo "primero cerrar, después crear"
+  // ===================== RELIST =====================
+
   const handleRelistWithType = async (
     itemId: string,
-    listingTypeId: "silver" | "gold" // 👈 ahora usamos silver | gold
+    listingTypeId: "silver" | "gold"
   ) => {
+    // Chequear cupo solo si tenemos datos (si no, dejamos que ML responda)
+    if (listingTypeId === "silver" && quota.silver) {
+      if (quota.silver.available <= 0) {
+        Alert.alert(
+          "Sin cupo plata",
+          "No te quedan publicaciones plata disponibles en tu paquete."
+        );
+        return;
+      }
+    }
+    if (listingTypeId === "gold" && quota.gold) {
+      if (quota.gold.available <= 0) {
+        Alert.alert(
+          "Sin cupo oro",
+          "No te quedan publicaciones oro disponibles en tu paquete."
+        );
+        return;
+      }
+    }
+
     try {
       setRelistingId(itemId);
 
-      // 1) Paso: CERRANDO
+      // 1) CERRAR
       setRelistStep("closing");
 
-      // Traer datos del ítem original (para tenerlos antes de cerrar)
       const original = await meliFetch(`/items/${itemId}`);
       const oldItemId = original.id;
 
       console.log("ORIGINAL seller_contact:", original.seller_contact);
       console.log("ORIGINAL video_id:", original.video_id);
 
-      // Traer descripción antes de cerrar
       let descriptionText = "";
       try {
         const desc = await meliFetch(`/items/${oldItemId}/description`);
@@ -152,7 +260,6 @@ export default function MeliTest() {
         console.log("Sin descripción o error trayendo descripción", e);
       }
 
-      // Intentar cerrar la publicación vieja
       const closed = await meliFetch(`/items/${oldItemId}`, {
         method: "PUT",
         body: JSON.stringify({ status: "closed" }),
@@ -165,10 +272,9 @@ export default function MeliTest() {
         );
       }
 
-      // 2) Paso: CREANDO
+      // 2) CREAR NUEVA
       setRelistStep("creating");
 
-      // Filtrar atributos no modificables / conflictivos
       const filteredAttributes = (original.attributes || []).filter(
         (attr: any) =>
           !["MARKET", "IS_OFFERED_BY_BRAND", "VERIFIED_VEHICLES"].includes(
@@ -176,7 +282,6 @@ export default function MeliTest() {
           )
       );
 
-      // Asegurar location
       let location = original.location;
       if (
         !location ||
@@ -193,7 +298,6 @@ export default function MeliTest() {
         };
       }
 
-      // Armar nuevo ítem (base)
       const newItemBody: any = {
         title: original.title,
         category_id: original.category_id,
@@ -211,19 +315,16 @@ export default function MeliTest() {
         location,
       };
 
-      // 👇 Copiar seller_contact (teléfono / WhatsApp) si existe
       if (original.seller_contact) {
         newItemBody.seller_contact = original.seller_contact;
       }
 
-      // 👇 Copiar video de YouTube si existe
       if (original.video_id) {
         newItemBody.video_id = original.video_id;
       }
 
       console.log("NEW ITEM BODY:", newItemBody);
 
-      // Crear nueva publicación
       const created = await meliFetch(`/items`, {
         method: "POST",
         body: JSON.stringify(newItemBody),
@@ -231,7 +332,6 @@ export default function MeliTest() {
 
       const newItemId = created.id;
 
-      // Clonar descripción si había
       if (descriptionText && newItemId) {
         try {
           await meliFetch(`/items/${newItemId}/description`, {
@@ -243,8 +343,8 @@ export default function MeliTest() {
         }
       }
 
-      // Refrescar lista desde ML con los items actuales del usuario
       await loadItems();
+      await loadQuota();
 
       Alert.alert(
         "Republicado",
@@ -252,17 +352,49 @@ export default function MeliTest() {
       );
     } catch (e: any) {
       console.log("ERROR RELIST:", e);
-      Alert.alert("Error", e.message || "No se pudo republicar el ítem");
+
+      const msg = String(e?.message || "");
+
+      if (msg.toLowerCase().includes("not available quota")) {
+        Alert.alert(
+          "Sin cupo",
+          "Mercado Libre indica que no te queda cupo disponible para este tipo de publicación."
+        );
+      } else {
+        Alert.alert("Error", msg || "No se pudo republicar el ítem");
+      }
     } finally {
       setRelistStep(null);
       setRelistingId(null);
     }
   };
 
+  // ===================== RENDER =====================
+
   return (
     <SafeAreaView style={styles.container}>
       <Text style={styles.header}>Mercado Libre Tester</Text>
-      <Button title="Recargar" onPress={loadItems} />
+
+      {/* Barra de cupos */}
+      <View style={styles.quotaBar}>
+        <View style={styles.quotaHeaderRow}>
+          <Text style={styles.quotaTitle}>Cupos disponibles (pack actual)</Text>
+          {quotaLoading && <ActivityIndicator size="small" />}
+        </View>
+        <Text style={styles.quotaText}>
+          Plata:{" "}
+          {quota.silver
+            ? `${quota.silver.available}/${quota.silver.total}`
+            : "-"}
+          {"   "}·   Oro:{" "}
+          {quota.gold
+            ? `${quota.gold.available}/${quota.gold.total}`
+            : "sin datos de pack"}
+        </Text>
+        <Button title="Actualizar cupos" onPress={loadQuota} />
+      </View>
+
+      <Button title="Recargar publicaciones" onPress={loadItems} />
 
       {loading ? (
         <View style={styles.center}>
@@ -298,7 +430,29 @@ export default function MeliTest() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 16, backgroundColor: "#f5f5f5" },
-  header: { fontSize: 22, fontWeight: "700", marginBottom: 12 },
+  header: { fontSize: 22, fontWeight: "700", marginBottom: 8 },
   center: { flex: 1, justifyContent: "center", alignItems: "center" },
   listContent: { paddingBottom: 40 },
+  quotaBar: {
+    backgroundColor: "#ffffff",
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 12,
+    elevation: 1,
+  },
+  quotaHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 4,
+  },
+  quotaTitle: {
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  quotaText: {
+    fontSize: 13,
+    color: "#555",
+    marginBottom: 6,
+  },
 });
