@@ -1,5 +1,5 @@
 // app/meli-test.tsx
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   View,
   Text,
@@ -8,13 +8,14 @@ import {
   ActivityIndicator,
   Alert,
   StyleSheet,
+  TextInput,
+  TouchableOpacity,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import MeliItemRow, { type RelistStep } from "../components/MeliItemRow";
 import { meliFetch, getItemsByIds, type MeliItem } from "../lib/meliApi";
 
-// 👉 Tu user_id de ML
 const ML_USER_ID = 327544193;
 
 type QuotaInfo = {
@@ -22,6 +23,9 @@ type QuotaInfo = {
   available: number;
   total: number;
 };
+
+type ListingFilter = "all" | "silver" | "gold";
+type SortOrder = "date-desc" | "date-asc";
 
 export default function MeliTest() {
   const [loading, setLoading] = useState(false);
@@ -36,29 +40,23 @@ export default function MeliTest() {
     gold?: QuotaInfo;
   }>({});
 
-  // ===================== HELPERS CUPOS =====================
-  const buildQuotaFrom = (obj: any): QuotaInfo => {
-    const used =
-      obj?.used_listings ?? obj?.used ?? 0;
-    const available =
-      obj?.remaining_listings ?? obj?.available ?? 0;
-    const total =
-      obj?.total_listings ?? obj?.total ?? used + available;
+  // filtros
+  const [search, setSearch] = useState("");
+  const [listingFilter, setListingFilter] =
+    useState<ListingFilter>("all");
+  const [sortOrder, setSortOrder] = useState<SortOrder>("date-desc");
+  const [filtersOpen, setFiltersOpen] = useState(true);
 
-    return { used, available, total };
-  };
-
-  // ===================== LOAD ITEMS =====================
-
+  // ====== Cargar ítems publicados
   const loadItems = async () => {
     try {
       setLoading(true);
 
-      const search = await meliFetch(
+      const searchRes = await meliFetch(
         `/users/${ML_USER_ID}/items/search?status=active&limit=50&offset=0`
       );
 
-      const ids: string[] = search.results || [];
+      const ids: string[] = searchRes.results || [];
 
       if (!ids.length) {
         setItems([]);
@@ -78,8 +76,7 @@ export default function MeliTest() {
     }
   };
 
-  // ===================== LOAD QUOTA =====================
-
+  // ====== Cupos
   const loadQuota = async () => {
     try {
       setQuotaLoading(true);
@@ -90,52 +87,44 @@ export default function MeliTest() {
 
       console.log("PACKS RAW:", packs);
 
-      if (!Array.isArray(packs) || packs.length === 0) {
+      if (!Array.isArray(packs)) {
         setQuota({});
         return;
       }
 
-      // Paquete actual (status === "active")
-      const activePack = packs.find((p: any) => p.status === "active");
+      const currentPack = packs.find((p: any) => p.status === "active");
 
-      if (!activePack) {
+      if (!currentPack) {
         setQuota({});
         return;
       }
 
-      const listingDetails: any[] = Array.isArray(activePack.listing_details)
-        ? activePack.listing_details
-        : [];
+      let silver: QuotaInfo | undefined;
+      let gold: QuotaInfo | undefined;
 
-      // Intentamos separar por tipo de publicación
-      const silverDetail = listingDetails.find((d) =>
-        String(d.listing_type_id || "").toLowerCase().includes("silver")
-      );
-      const goldDetail = listingDetails.find((d) =>
-        String(d.listing_type_id || "").toLowerCase().includes("gold")
-      );
-
-      let silverQuota: QuotaInfo | undefined;
-      let goldQuota: QuotaInfo | undefined;
-
-      // Si hay detalle específico de silver, lo usamos.
-      // Si no, usamos el cupo total del pack como "silver".
-      if (silverDetail) {
-        silverQuota = buildQuotaFrom(silverDetail);
-      } else {
-        silverQuota = buildQuotaFrom(activePack);
+      if (Array.isArray(currentPack.listing_details)) {
+        for (const det of currentPack.listing_details) {
+          if (det.listing_type_id === "silver") {
+            silver = {
+              used: det.used_listings ?? 0,
+              available: det.remaining_listings ?? 0,
+              total:
+                (det.used_listings ?? 0) +
+                  (det.remaining_listings ?? 0) || 0,
+            };
+          } else if (det.listing_type_id.startsWith("gold")) {
+            gold = {
+              used: det.used_listings ?? 0,
+              available: det.remaining_listings ?? 0,
+              total:
+                (det.used_listings ?? 0) +
+                  (det.remaining_listings ?? 0) || 0,
+            };
+          }
+        }
       }
 
-      // Si hay detalle específico de gold, lo seteamos.
-      // Si no, queda undefined (no hay cupo oro separado en el pack).
-      if (goldDetail) {
-        goldQuota = buildQuotaFrom(goldDetail);
-      }
-
-      setQuota({
-        silver: silverQuota,
-        gold: goldQuota,
-      });
+      setQuota({ silver, gold });
     } catch (e: any) {
       console.log("ERROR loadQuota:", e);
       setQuota({});
@@ -149,8 +138,7 @@ export default function MeliTest() {
     loadQuota();
   }, []);
 
-  // ===================== UPDATE PRICE =====================
-
+  // ====== Cambiar precio
   const handleUpdatePrice = async (itemId: string, newPriceStr: string) => {
     const cleaned = newPriceStr.replace(/[^\d.,]/g, "").replace(",", ".");
     const newPrice = Number(cleaned);
@@ -183,8 +171,7 @@ export default function MeliTest() {
     }
   };
 
-  // ===================== CLOSE ITEM =====================
-
+  // ====== Cerrar publicación
   const handleClose = async (itemId: string) => {
     try {
       setUpdatingId(itemId);
@@ -214,13 +201,11 @@ export default function MeliTest() {
     }
   };
 
-  // ===================== RELIST =====================
-
+  // ====== Relistar
   const handleRelistWithType = async (
     itemId: string,
     listingTypeId: "silver" | "gold"
   ) => {
-    // Chequear cupo solo si tenemos datos (si no, dejamos que ML responda)
     if (listingTypeId === "silver" && quota.silver) {
       if (quota.silver.available <= 0) {
         Alert.alert(
@@ -243,14 +228,9 @@ export default function MeliTest() {
     try {
       setRelistingId(itemId);
 
-      // 1) CERRAR
       setRelistStep("closing");
-
       const original = await meliFetch(`/items/${itemId}`);
       const oldItemId = original.id;
-
-      console.log("ORIGINAL seller_contact:", original.seller_contact);
-      console.log("ORIGINAL video_id:", original.video_id);
 
       let descriptionText = "";
       try {
@@ -272,7 +252,6 @@ export default function MeliTest() {
         );
       }
 
-      // 2) CREAR NUEVA
       setRelistStep("creating");
 
       const filteredAttributes = (original.attributes || []).filter(
@@ -318,7 +297,6 @@ export default function MeliTest() {
       if (original.seller_contact) {
         newItemBody.seller_contact = original.seller_contact;
       }
-
       if (original.video_id) {
         newItemBody.video_id = original.video_id;
       }
@@ -369,7 +347,42 @@ export default function MeliTest() {
     }
   };
 
-  // ===================== RENDER =====================
+  // ====== Filtros + orden
+  const filteredItems = useMemo(() => {
+    const term = search.trim().toLowerCase();
+
+    const list = items.filter((item) => {
+      const matchesSearch =
+        term.length === 0 ||
+        item.title.toLowerCase().includes(term) ||
+        item.id.toLowerCase().includes(term);
+
+      let matchesType = true;
+      if (listingFilter === "silver") {
+        matchesType = item.listing_type_id === "silver";
+      } else if (listingFilter === "gold") {
+        matchesType = item.listing_type_id.startsWith("gold");
+      }
+
+      return matchesSearch && matchesType;
+    });
+
+    // ordenar por fecha
+    const sorted = [...list].sort((a, b) => {
+      const da = a.date_created ? new Date(a.date_created).getTime() : 0;
+      const db = b.date_created ? new Date(b.date_created).getTime() : 0;
+
+      if (sortOrder === "date-desc") {
+        // más recientes primero
+        return db - da;
+      } else {
+        // más viejas primero
+        return da - db;
+      }
+    });
+
+    return sorted;
+  }, [items, search, listingFilter, sortOrder]);
 
   return (
     <SafeAreaView style={styles.container}>
@@ -386,28 +399,146 @@ export default function MeliTest() {
           {quota.silver
             ? `${quota.silver.available}/${quota.silver.total}`
             : "-"}
-          {"   "}·   Oro:{" "}
-          {quota.gold
-            ? `${quota.gold.available}/${quota.gold.total}`
-            : "sin datos de pack"}
+          {"     "}Oro:{" "}
+          {quota.gold ? `${quota.gold.available}/${quota.gold.total}` : "-"}
         </Text>
-        <Button title="Actualizar cupos" onPress={loadQuota} />
+        <Button title="ACTUALIZAR CUPOS" onPress={loadQuota} />
       </View>
 
-      <Button title="Recargar publicaciones" onPress={loadItems} />
+      {/* Botón para plegar/desplegar filtros */}
+      <View style={styles.filtersToggleContainer}>
+        <TouchableOpacity
+          style={styles.filtersToggleBtn}
+          onPress={() => setFiltersOpen((prev) => !prev)}
+        >
+          <Text style={styles.filtersToggleText}>
+            {filtersOpen ? "Ocultar filtros ▲" : "Mostrar filtros ▼"}
+          </Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Filtros (plegables) */}
+      {filtersOpen && (
+        <View style={styles.filtersBox}>
+          <TextInput
+            style={styles.searchInput}
+            value={search}
+            onChangeText={setSearch}
+            placeholder="Buscar por título o ID..."
+          />
+
+          <View style={styles.filterRow}>
+            <TouchableOpacity
+              style={[
+                styles.filterBtn,
+                listingFilter === "all" && styles.filterBtnActive,
+              ]}
+              onPress={() => setListingFilter("all")}
+            >
+              <Text
+                style={[
+                  styles.filterBtnText,
+                  listingFilter === "all" && styles.filterBtnTextActive,
+                ]}
+              >
+                Todas
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[
+                styles.filterBtn,
+                listingFilter === "silver" && styles.filterBtnActive,
+              ]}
+              onPress={() => setListingFilter("silver")}
+            >
+              <Text
+                style={[
+                  styles.filterBtnText,
+                  listingFilter === "silver" && styles.filterBtnTextActive,
+                ]}
+              >
+                Plata
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[
+                styles.filterBtn,
+                listingFilter === "gold" && styles.filterBtnActive,
+              ]}
+              onPress={() => setListingFilter("gold")}
+            >
+              <Text
+                style={[
+                  styles.filterBtnText,
+                  listingFilter === "gold" && styles.filterBtnTextActive,
+                ]}
+              >
+                Oro
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Orden por fecha */}
+          <View style={styles.sortRow}>
+            <Text style={styles.sortLabel}>Ordenar por publicación:</Text>
+
+            <View style={styles.sortButtonsRow}>
+              <TouchableOpacity
+                style={[
+                  styles.sortBtn,
+                  sortOrder === "date-desc" && styles.sortBtnActive,
+                ]}
+                onPress={() => setSortOrder("date-desc")}
+              >
+                <Text
+                  style={[
+                    styles.sortBtnText,
+                    sortOrder === "date-desc" && styles.sortBtnTextActive,
+                  ]}
+                >
+                  Más recientes
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.sortBtn,
+                  sortOrder === "date-asc" && styles.sortBtnActive,
+                ]}
+                onPress={() => setSortOrder("date-asc")}
+              >
+                <Text
+                  style={[
+                    styles.sortBtnText,
+                    sortOrder === "date-asc" && styles.sortBtnTextActive,
+                  ]}
+                >
+                  Más viejas
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      )}
+
+      <View style={styles.reloadBox}>
+        <Button title="RECARGAR PUBLICACIONES" onPress={loadItems} />
+      </View>
 
       {loading ? (
         <View style={styles.center}>
           <ActivityIndicator size="large" />
           <Text>Cargando publicaciones...</Text>
         </View>
-      ) : items.length === 0 ? (
+      ) : filteredItems.length === 0 ? (
         <View style={styles.center}>
-          <Text>No se encontraron ítems publicados.</Text>
+          <Text>No se encontraron ítems con esos filtros.</Text>
         </View>
       ) : (
         <FlatList
-          data={items}
+          data={filteredItems}
           keyExtractor={(item) => item.id}
           renderItem={({ item }) => (
             <MeliItemRow
@@ -454,5 +585,100 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: "#555",
     marginBottom: 6,
+  },
+  // toggle filtros
+  filtersToggleContainer: {
+    marginBottom: 6,
+  },
+  filtersToggleBtn: {
+    alignSelf: "flex-start",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: "#1976D2",
+    backgroundColor: "#E3F2FD",
+  },
+  filtersToggleText: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: "#1976D2",
+  },
+  // caja filtros
+  filtersBox: {
+    backgroundColor: "#ffffff",
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 10,
+    elevation: 1,
+  },
+  searchInput: {
+    borderWidth: 1,
+    borderColor: "#ddd",
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginBottom: 8,
+    backgroundColor: "#fafafa",
+  },
+  filterRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginBottom: 8,
+  },
+  filterBtn: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: "#1976D2",
+    borderRadius: 6,
+    paddingVertical: 8,
+    alignItems: "center",
+    marginHorizontal: 3,
+  },
+  filterBtnActive: {
+    backgroundColor: "#1976D2",
+  },
+  filterBtnText: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: "#1976D2",
+  },
+  filterBtnTextActive: {
+    color: "#fff",
+  },
+  // ordenamiento
+  sortRow: {
+    marginTop: 4,
+  },
+  sortLabel: {
+    fontSize: 12,
+    color: "#555",
+    marginBottom: 4,
+  },
+  sortButtonsRow: {
+    flexDirection: "row",
+  },
+  sortBtn: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: "#757575",
+    borderRadius: 6,
+    paddingVertical: 6,
+    alignItems: "center",
+    marginHorizontal: 3,
+  },
+  sortBtnActive: {
+    backgroundColor: "#424242",
+  },
+  sortBtnText: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: "#424242",
+  },
+  sortBtnTextActive: {
+    color: "#fff",
+  },
+  reloadBox: {
+    marginBottom: 10,
   },
 });
